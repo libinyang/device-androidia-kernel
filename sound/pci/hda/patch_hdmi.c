@@ -33,6 +33,9 @@
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/module.h>
+#ifdef CONFIG_SWITCH
+#include <linux/switch.h>
+#endif
 #include <sound/core.h>
 #include <sound/jack.h>
 #include <sound/asoundef.h>
@@ -96,6 +99,7 @@ struct hdmi_spec_per_pin {
 	bool non_pcm;
 	bool chmap_set;		/* channel-map override by ALSA API? */
 	unsigned char chmap[8]; /* ALSA API channel-map */
+	bool monitor_connected;
 #ifdef CONFIG_SND_PROC_FS
 	struct snd_info_entry *proc_entry;
 #endif
@@ -176,6 +180,13 @@ struct hdmi_spec {
 	struct i915_audio_component_audio_ops i915_audio_ops;
 	bool i915_bound; /* was i915 bound in this driver? */
 
+	/*
+	 * a simple implementation for hdmi switch
+	 * To full support hdmi switch, it should be pin oriented.
+	 */
+#ifdef CONFIG_SWITCH
+	struct switch_dev hdmi_sdev;
+#endif
 	struct hdac_chmap chmap;
 };
 
@@ -1400,6 +1411,28 @@ static void hdmi_pcm_reset_pin(struct hdmi_spec *spec,
 	per_pin->channels = 0;
 }
 
+#ifdef CONFIG_SWITCH
+static void hdmi_switch_state(struct switch_dev *hdmi_sdev, int state)
+{
+	if (hdmi_sdev->state != state)
+		switch_set_state(hdmi_sdev, state);
+}
+
+static bool hdmi_monitor_connected(struct hdmi_spec *spec)
+{
+	struct hdmi_spec_per_pin *per_pin;
+	int pin_idx;
+
+	for (pin_idx = 0; pin_idx < spec->num_pins; pin_idx++) {
+		per_pin = get_pin(spec, pin_idx);
+		if (per_pin->monitor_connected)
+			return true;
+	}
+
+	return false;
+}
+#endif
+
 /* update per_pin ELD from the given new ELD;
  * setup info frame and notification accordingly
  */
@@ -1430,9 +1463,15 @@ static void update_eld(struct hda_codec *codec,
 	if (pcm_idx == -1)
 		pcm_idx = per_pin->pcm_idx;
 
-	if (eld->eld_valid)
+	if (eld->eld_valid) {
+		per_pin->monitor_connected = true;
 		snd_hdmi_show_eld(codec, &eld->info);
+	} else
+		per_pin->monitor_connected = false;
 
+#ifdef CONFIG_SWITCH
+	hdmi_switch_state(&spec->hdmi_sdev, hdmi_monitor_connected(spec));
+#endif
 	eld_changed = (pin_eld->eld_valid != eld->eld_valid);
 	if (eld->eld_valid && pin_eld->eld_valid)
 		if (pin_eld->eld_size != eld->eld_size ||
@@ -2518,6 +2557,13 @@ static int patch_i915_hsw_hdmi(struct hda_codec *codec)
 	if (err < 0)
 		return err;
 	spec = codec->spec;
+#ifdef CONFIG_SWITCH
+	spec->hdmi_sdev.name = "hdmi_audio";
+	if (switch_dev_register(&spec->hdmi_sdev) < 0) {
+		codec_warn(codec, "failed to register hdmi switch\n");
+		switch_dev_unregister(&spec->hdmi_sdev);
+	}
+#endif
 	codec->dp_mst = true;
 	spec->dyn_pcm_assign = true;
 
@@ -2564,7 +2610,13 @@ static int patch_i915_byt_hdmi(struct hda_codec *codec)
 	if (err < 0)
 		return err;
 	spec = codec->spec;
-
+#ifdef CONFIG_SWITCH
+	spec->hdmi_sdev.name = "hdmi_audio";
+	if (switch_dev_register(&spec->hdmi_sdev) < 0) {
+		codec_warn(codec, "failed to register hdmi switch\n");
+		switch_dev_unregister(&spec->hdmi_sdev);
+	}
+#endif
 	/* For Valleyview/Cherryview, only the display codec is in the display
 	 * power well and can use link_power ops to request/release the power.
 	 */
